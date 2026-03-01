@@ -1,180 +1,106 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>PhishGuard AI | Cybersecurity Platform</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+import os
+from flask import Flask, render_template, request, jsonify
+import joblib
+import re
+from difflib import SequenceMatcher
 
-    <style>
-        * {
-            margin:0;
-            padding:0;
-            box-sizing:border-box;
-            font-family:Segoe UI, sans-serif;
-        }
+app = Flask(__name__)
 
-        body {
-            background:#0e1117;
-            color:white;
-            display:flex;
-            min-height:100vh;
-        }
+# -------------------------------
+# Safe Model Loading
+# -------------------------------
+try:
+    model = joblib.load("model.pkl")
+    vectorizer = joblib.load("vectorizer.pkl")
+except Exception as e:
+    print("Error loading model or vectorizer:", e)
+    model = None
+    vectorizer = None
 
-        .sidebar {
-            width:220px;
-            background:#161b22;
-            padding:25px;
-        }
+# -------------------------------
+# Configuration
+# -------------------------------
+TRUSTED_DOMAINS = ["google.com", "microsoft.com", "amazon.com"]
+SUSPICIOUS_WORDS = ["urgent", "verify", "click here", "free", "update", "bank"]
 
-        .sidebar h2 {
-            color:#ff6b00;
-            margin-bottom:30px;
-        }
+analysis_history = []
 
-        .sidebar a {
-            display:block;
-            color:#ccc;
-            text-decoration:none;
-            margin-bottom:15px;
-            transition:0.2s;
-        }
+# -------------------------------
+# Core Functions
+# -------------------------------
+def calculate_risk(text):
+    if not model or not vectorizer:
+        return 0
+    X = vectorizer.transform([text])
+    probability = model.predict_proba(X)[0][1]
+    return round(probability * 100, 2)
 
-        .sidebar a:hover {
-            color:#ff6b00;
-        }
+def highlight_keywords(text):
+    for word in SUSPICIOUS_WORDS:
+        text = re.sub(
+            word,
+            f"<span style='color:red'>{word}</span>",
+            text,
+            flags=re.IGNORECASE
+        )
+    return text
 
-        .main {
-            flex:1;
-            padding:40px;
-        }
+def check_url_similarity(text):
+    urls = re.findall(r'(https?://[^\s]+)', text)
+    flagged = []
+    for url in urls:
+        domain = url.split("//")[-1].split("/")[0]
+        for trusted in TRUSTED_DOMAINS:
+            similarity = SequenceMatcher(None, domain, trusted).ratio()
+            if similarity > 0.7 and domain != trusted:
+                flagged.append(f"{domain} looks like {trusted}")
+    return flagged
 
-        .card {
-            background:#161b22;
-            padding:30px;
-            border-radius:12px;
-        }
+# -------------------------------
+# Routes
+# -------------------------------
+@app.route("/")
+def index():
+    return render_template("index.html")
 
-        textarea {
-            width:100%;
-            height:150px;
-            background:#1f2933;
-            border:none;
-            border-radius:8px;
-            padding:15px;
-            color:white;
-            margin-top:15px;
-        }
+@app.route("/analyze", methods=["POST"])
+def analyze():
+    text = request.json.get("text", "")
+    risk = calculate_risk(text)
 
-        textarea:focus {
-            outline:2px solid #ff6b00;
-        }
+    analysis_history.append(risk)
 
-        .meter {
-            width:100%;
-            height:14px;
-            background:#2a2f36;
-            border-radius:10px;
-            margin:20px 0;
-            overflow:hidden;
-        }
-
-        .fill {
-            height:100%;
-            width:0%;
-            transition:width 0.6s ease;
-        }
-
-        .safe { background:#16c784; }
-        .warn { background:#f59e0b; }
-        .danger { background:#ef4444; }
-
-        .status {
-            margin-top:15px;
-            font-size:18px;
-        }
-
-        .analysis-box {
-            margin-top:15px;
-            background:#1c2128;
-            padding:15px;
-            border-radius:8px;
-        }
-
-        .url-warning {
-            margin-top:10px;
-            color:#ff6b6b;
-            font-size:13px;
-        }
-
-        .footer {
-            margin-top:40px;
-            font-size:12px;
-            color:#666;
-        }
-    </style>
-</head>
-
-<body>
-
-<div class="sidebar">
-    <h2>PhishGuard</h2>
-    <a href="/">Threat Scanner</a>
-    <a href="/dashboard">Analytics</a>
-</div>
-
-<div class="main">
-    <div class="card">
-        <h1>Real-Time Email Threat Scanner</h1>
-
-        <textarea id="emailInput" placeholder="Paste or type email content here..."></textarea>
-
-        <div class="status" id="statusText"></div>
-
-        <div class="meter">
-            <div id="fill" class="fill"></div>
-        </div>
-
-        <div id="riskScore"></div>
-
-        <div class="analysis-box" id="analysisContent"></div>
-        <div class="url-warning" id="urlWarnings"></div>
-    </div>
-
-    <div class="footer">
-        © 2026 PhishGuard AI | Enterprise Cybersecurity Platform
-    </div>
-</div>
-
-<script>
-const textarea = document.getElementById("emailInput");
-
-textarea.addEventListener("input", function() {
-
-    fetch("/analyze", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({ text: textarea.value })
+    return jsonify({
+        "risk": risk,
+        "status": "High Risk" if risk > 70 else "Suspicious" if risk > 40 else "Safe",
+        "highlighted_text": highlight_keywords(text),
+        "url_flags": check_url_similarity(text)
     })
-    .then(res => res.json())
-    .then(data => {
 
-        document.getElementById("statusText").innerText = data.status;
-        document.getElementById("riskScore").innerText = "Risk Score: " + data.risk + "%";
-        document.getElementById("analysisContent").innerHTML = data.highlighted_text;
+@app.route("/dashboard")
+def dashboard():
+    if analysis_history:
+        avg = round(sum(analysis_history) / len(analysis_history), 2)
+        high = len([r for r in analysis_history if r > 70])
+        medium = len([r for r in analysis_history if 40 < r <= 70])
+        low = len([r for r in analysis_history if r <= 40])
+        history = analysis_history
+    else:
+        avg = high = medium = low = 0
+        history = []
 
-        let fill = document.getElementById("fill");
-        fill.style.width = data.risk + "%";
-        fill.className = "fill";
+    return render_template(
+        "dashboard.html",
+        total=len(analysis_history),
+        avg=avg,
+        high=high,
+        medium=medium,
+        low=low,
+        history=history
+    )
 
-        if (data.risk > 70) fill.classList.add("danger");
-        else if (data.risk > 40) fill.classList.add("warn");
-        else fill.classList.add("safe");
-
-        document.getElementById("urlWarnings").innerHTML =
-            data.url_flags.map(f => "⚠ " + f).join("<br>");
-    });
-
-});
-</script>
-
-</body>
-</html>
+# -------------------------------
+# Run Application
+# -------------------------------
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
