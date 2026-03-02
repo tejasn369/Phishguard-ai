@@ -3,3 +3,6 @@ scikit-learn
 joblib
 pandas
 gunicorn
+flask_sqlalchemy
+psycopg2-binary
+markupsafe
